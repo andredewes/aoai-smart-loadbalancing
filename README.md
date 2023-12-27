@@ -50,16 +50,57 @@ The source code provides a Dockerfile, which means you are free to build and dep
 
 If you are not comfortable working with container images and you would like a very easy way to test this load balancer in Azure, you can deploy quickly to [Azure Container Apps](https://azure.microsoft.com/products/container-apps):
 
-![Deploy to Azure](https://aka.ms/deploytoazurebutton)
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fandredewes%2Faoai-smart-loadbalancing%2Fmain%2Fazuredeploy.json)
+
+- Clicking the Deploy button above, you will be taken to an Azure page with the required parameters. You need to fill the parameters beginning with "BACKEND_X_" (see below in [Configuring the OpenAI endpoints](#Configuring-the-OpenAI-endpoints) for more information on what they do)
+- After the deployment is finished, go to your newly created Container Apps service and from the Overview menu, get the Application Url of your app. The format will be "https://app-[something].[region].azurecontainerapps.io". This is the URL you will call from your client applications
+
 
 ### [Option 2] Build and deploy as a Docker image
 
-1. Docker build
-2. 
+If you want to clone this repository and build your own image instead of using the pre-built public image:
+
+`
+docker build -t aoai-smart-loadbalancing:v1 .
+`
+
+This will use the Dockerfile which will build the source code inside the container itself (no need to have .NET build tools in your host machine) and then it will copy the build output to a new runtime image for ASP.NET 8. Just make sure your Docker version supports [multi-stage](https://docs.docker.com/build/building/multi-stage/) builds. The final image will have around 87 MB.
 
 ### [Option 3] Deploy the pre-built image from Docker hub
 
+If you don't want to build the container from the source code, you can pull it from the public Docker registry:
+
+`
+docker pull andredewes/aoai-smart-loadbalancing:v1
+`
+
 ### Configuring the OpenAI endpoints
+
+After you deployed your container service using one of the methods above, it is time to adjust your OpenAI backends configuration using environment variables.
+This is the expected format you must provide:
+
+| Environment variable name | Description                                                                                                                                                                         | Example                               |
+|---------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------|
+| BACKEND_X_URL             | The full Azure OpenAI URL. Replace "_X_" with the number of your backend. For example, "BACKEND_1_URL" or "BACKEND_2_URL"                                                           | https://andre-openai.openai.azure.com |
+| BACKEND_X_PRIORITY        | The priority of your OpenAI endpoint. Lower numbers means higher priority. Replace "_X_" with the number of your backend. For example, "BACKEND_1_PRIORITY" or "BACKEND_2_PRIORITY" | 1                                     |
+| BACKEND_X_APIKEY          | The API key of your OpenAI endpoint. Replace "_X_" with the number of your backend. For example, "BACKEND_1_APIKEY" or "BACKEND_2_APIKEY"                                           | 761c427c520d40c991299c66d10c6e40      |
+
+For example, let's say you would like to configure the load balancer to have a main endpoint (we call it here BACKEND_1). We set it with the highest priority 1. And then we have two more endpoints as fallback in case the main one is throttling... we define then BACKEND_2 and BACKEND_3 with the same priority of 2:
+
+
+| Environment variable name | Value                                   |
+|---------------------------|-----------------------------------------|
+| BACKEND_1_URL             | https://andre-openai.openai.azure.com   |
+| BACKEND_1_PRIORITY        | 1                                       |
+| BACKEND_1_APIKEY          | 33b9996ce4644bc0893c7988bae349af        |
+| BACKEND_2_URL             | https://andre-openai-2.openai.azure.com |
+| BACKEND_2_PRIORITY        | 2                                       |
+| BACKEND_2_APIKEY          | 412ceac74dde451e9ac12581ca50b5c5        |
+| BACKEND_3_URL             | https://andre-openai-3.openai.azure.com |
+| BACKEND_3_PRIORITY        | 2                                       |
+| BACKEND_3_APIKEY          | 326ec768694d4d469eda2fe2c582ef8b        |
+
+It is important to always create 3 environment variables for each new OpenAI endpoiny that you would like to use.
 
 ### Testing the solution
 
@@ -68,154 +109,43 @@ If you are not comfortable working with container images and you would like a ve
     from openai import AzureOpenAI
 
     client = AzureOpenAI(
-        azure_endpoint="https://<your_APIM_endpoint>.azure-api.net/<your_api_suffix>", #do not add "/openai" at the end here because this will be automatically added by this SDK
-        api_key="<your subscription key>",
+        azure_endpoint="https://<your_load_balancer_url>",  #if you deployed to Azure Container Apps, it will be 'https://app-[something].[region].azurecontainerapps.io'
+        api_key="does-not-matter", #The api-key sent by the client SDKs will be overriden by the ones configured in the backend environment variables
         api_version="2023-12-01-preview"
     )
 
     response = client.chat.completions.create(
-        model="<your_deployment_name>",
+        model="<your_openai_deployment_name>",
         messages=[
             {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "Does Azure OpenAI support customer managed keys?"}
+            {"role": "user", "content": "What is the first letter of the alphabet?"}
         ]
     )
     print(response)
     ```
 
-## :page_with_curl: Working with the policy
-
-I'm using [API Management policies](https://learn.microsoft.com/azure/api-management/api-management-howto-policies) to define all this logic. API Management doesn't have built-in support for this scenario but by using custom policies we can achieve it. Let's take a look in the most important parts of the policy:
-
-```xml
-<set-variable name="listBackends" value="@{
-    // -------------------------------------------------
-    // ------- Explanation of backend properties -------
-    // -------------------------------------------------
-    // "url":          Your backend url
-    // "priority":     Lower value means higher priority over other backends. 
-    //                 If you have more one or more Priority 1 backends, they will always be used instead
-    //                 of Priority 2 or higher. Higher values backends will only be used if your lower values (top priority) are all throttling.
-    // "isThrottling": Indicates if this endpoint is returning 429 (Too many requests) currently
-    // "retryAfter":   We use it to know when to mark this endpoint as healthy again after we received a 429 response
-
-    JArray backends = new JArray();
-    backends.Add(new JObject()
-    {
-        { "url", "https://andre-openai-eastus.openai.azure.com/" },
-        { "priority", 1},
-        { "isThrottling", false }, 
-        { "retryAfter", DateTime.MinValue } 
-    });
-
-    backends.Add(new JObject()
-    {
-        { "url", "https://andre-openai-eastus-2.openai.azure.com/" },
-        { "priority", 1},
-        { "isThrottling", false },
-        { "retryAfter", DateTime.MinValue }
-    });
-
-    backends.Add(new JObject()
-    {
-        { "url", "https://andre-openai-canadaeast.openai.azure.com/" },
-        { "priority", 2},
-        { "isThrottling", false },
-        { "retryAfter", DateTime.MinValue }
-    });
-
-    backends.Add(new JObject()
-    {
-        { "url", "https://andre-openai-francecentral.openai.azure.com/" },
-        { "priority", 3},
-        { "isThrottling", false },
-        { "retryAfter", DateTime.MinValue }
-    });
-
-    return backends;   
-}" />
-```
-
-The variable `listBackends` at the beginning of the policy is the **only thing you need to change** to configure your backends and their priorities. In the above sample, we are telling API Management to consume US endpoints first (priority 1) and then falling back to Canada East (priority 2) and then France Central region (priority 3). We will use this array of JSON objects in API Management cache to share this property in the scope of all other incoming requests and not only in the scope of the current request. 
-
-```xml
-<authentication-managed-identity resource="https://cognitiveservices.azure.com" output-token-variable-name="msi-access-token" ignore-error="false" />
-<set-header name="Authorization" exists-action="override">
-    <value>@("Bearer " + (string)context.Variables["msi-access-token"])</value>
-</set-header>
-```
-
-This part of the policy is injecting the Azure Managed Identity from your API Management instance as a HTTP header towards OpenAI. I highly recommend you do this because you don't need to keep track of different API-Keys for each backend. You just need to [turn on managed identity in API Management](https://learn.microsoft.com/azure/api-management/api-management-howto-use-managed-service-identity#create-a-system-assigned-managed-identity) and then [allow that identity in Azure OpenAI](https://learn.microsoft.com/azure/ai-services/openai/how-to/managed-identity)
-
-Now let's explore and understand the other important pieces of this policy (nothing you need to change but good to be aware of):
-
-```xml
-<set-variable name="listBackends" value="@{
-    JArray backends = (JArray)context.Variables["listBackends"];
-
-    for (int i = 0; i < backends.Count; i++)
-    {
-        JObject backend = (JObject)backends[i];
-
-        if (backend.Value<bool>("isThrottling") && DateTime.Now >= backend.Value<DateTime>("retryAfter"))
-        {
-            backend["isThrottling"] = false;
-            backend["retryAfter"] = DateTime.MinValue;
-        }
-    }
-
-    return backends; 
-}" />
-```
-
-This piece of policy is called before every time we call OpenAI. It is just checking if any of the backends can be marked as healthy (not throttling) after we waited for the time specified in the "Retry-After" header.
-
-```xml
-<when condition="@(context.Response != null && (context.Response.StatusCode == 429 || context.Response.StatusCode.ToString().StartsWith("5")) )">
-    <cache-lookup-value key="listBackends" variable-name="listBackends" />
-    <set-variable name="listBackends" value="@{
-        JArray backends = (JArray)context.Variables["listBackends"];
-        int currentBackendIndex = context.Variables.GetValueOrDefault<int>("backendIndex");
-        int retryAfter = Convert.ToInt32(context.Response.Headers.GetValueOrDefault("Retry-After", "10"));
-
-        JObject backend = (JObject)backends[currentBackendIndex];
-        backend["isThrottling"] = true;
-        backend["retryAfter"] = DateTime.Now.AddSeconds(retryAfter);
-
-        return backends;      
-    }" />
-```
-
-This code is executed when there is a error 429 or 5xx coming from OpenAI. In case of errors 429, we will mark this backend as throttling and read the "Retry-After" header and add the number of seconds to wait before this is marked as not-throttling again. In case of unexpected 5xx errors, the waiting time will be 10 seconds.
-
-There are other parts of the policy in the sources but these are the most relevant. The original [source XML](apim-policy.xml) you can find in this repo contains comments explaining what each section does.
-
 ### Scalability vs Reliability
 This solution addresses both scalability and reliability concerns by allowing your total Azure OpenAI quotas to increase and providing server-side failovers transparently for your applications. However, if you are looking purely for a way to increase default quotas, I still would recommend that you follow the official guidance to [request a quota increase](https://learn.microsoft.com/azure/ai-services/openai/quotas-limits#how-to-request-increases-to-the-default-quotas-and-limits).
 
-### Caching and multiple API Management instances
-This policy is currently using API Management internal cache mode. That is a in-memory local cache. What if you have API Management running with multiple instances in one region or a multi-regional deployment? The side effect is that each instance will have its own list of backends. What might happen during runtime is this:
-- API Management instance 1 receives a customer request and gets a 429 error from backend 1. It marks that backend as unavailable for X seconds and then reroute that customer request to next backend
-- API Management instance 2 receives a customer request and sends that request again to backend 1 (since its local cached list of backends didn't have the information from API Management instance 1 when it marked as throttled). Backend 1 will respond with error 429 again and API Management instance 2 will also mark it as unavailable and reroutes the request to next backend
+### Multiple load balancer instances
+This solution uses the local memory to store the endpoints health state. That means each instance will have its own view of the throttling state of each OpenAI endpoint. What might happen during runtime is this:
+- Instance 1 receives a customer request and gets a 429 error from backend 1. It marks that backend as unavailable for X seconds and then reroute that customer request to next backend
+- Instance 2 receives a customer request and sends that request again to backend 1 (since its local cached list of backends didn't have the information from instance 1 when it marked as throttled). Backend 1 will respond with error 429 again and instance 2 will also mark it as unavailable and reroutes the request to next backend
 
-So, it might occur that internally, API Management instances will try route to throttled backends and will need to retry to another backend. Eventually, all instances will be in sync again at a small cost of unnecessary roundtrips to throttled endpoints.
-I honestly think this is a very small price to pay, but if you want to solve that you can always change API Management [to use an external Redis cache](https://learn.microsoft.com/azure/api-management/api-management-howto-cache-external) so all instances will share the same cached object.
+So, it might occur that internally, different instances will try route to throttled backends and will need to retry to another backend. Eventually, all instances will be in sync again at a small cost of unnecessary roundtrips to throttled endpoints.
+I honestly think this is a very small price to pay, but if you want to solve that you can always change the source code to use an external shared cache such as Redis, so all instances will share the same cached object.
+
+Having this in mind, be careful when you configure your hosting container service when it comes to scalability. For instance, the default scaling rules in a Azure Container Apps is the number of concurrent HTTP requests: if it is higher than 10, it will create another container instance. This effect is undesirable for the load balancer as it will create many instances, and that's why the Quick Deploy button in this repo changes that default behavior to only scale the container when CPU usage is higher than 50%. 
 
 ## :question: FAQ
 
-### I don't know anything about API Management. Where and how I add this code?
-You just need to copy the contents of the [policy XML](apim-policy.xml), modify the backends list (from line 21 to 83) and paste into one of your APIs policies. There is an easy tutorial on how to do that [here](https://learn.microsoft.com/azure/api-management/set-edit-policies?tabs=form).
-
 ### What happens if all backends are throttling at the same time?
-In that case, the policy will return the first backend in the list (line 158) and will forward the request to it. Since that endpoint is throttling, API Management will return the same 429 error as the OpenAI backend. That's why it is **still important for your client application/SDKs to have a logic to handle retries**, even though it should be much less frequent.
-
-### I am updating the backend list in the policies but it seems to keep the old list
-That is because the policy is coded to only create the backend list after it expires in the internal cache, after 60 seconds. That means if your API Management instance is getting at least one request every 60 seconds, that cache will not expire to pick up your latest changes. You can either manually remove the cached "listBackends" key by using [cache-remove-key](https://learn.microsoft.com/azure/api-management/cache-remove-value-policy) policy or call its Powershell operation to [remove a cache](https://learn.microsoft.com/powershell/module/az.apimanagement/remove-azapimanagementcache?view=azps-10.4.1)
+In that case, the load balancer will return the first backend in the list (line 158) and will forward the request to it. Since that endpoint is throttling, it will return the same 429 error as the OpenAI backend. That's why it is **still important for your client application/SDKs to have a logic to handle retries**, even though it should be much less frequent.
 
 ### Reading the C# logic is hard for me. Can you describe it in plain english?
 Sure. That's how it works when the load balancer gets a new incoming request:
 
-1. From the list of backends defined in the JSON array, it will pick one backend using this logic:
+1. From the list of backends defined in the environment variables, it will pick one backend using this logic:
    1. Selects the highest priority (lower number) that is not currently throttling. If it finds more than one healthy backend with the same priority, it will randomly select one of them
 2. Sends the request to the chosen backend URL
     1. If the backend responds with success (HTTP status code 200), the response is passed to the client and the flow ends here
@@ -226,4 +156,4 @@ Sure. That's how it works when the load balancer gets a new incoming request:
         4. If there are no backends available (all are throttling), it will send the customer request to the first backend defined in the list and return its response
 
 ## :link: Related articles
-- A more detailed and user-friendly step-by-step article by [csiebler](https://github.com/csiebler): [Smart Load-Balancing for Azure OpenAI with Azure API Management](https://clemenssiebler.com/posts/smart-loadbalancing-for-azure-openai-with-api-management/)
+- The same load balancer logic but using Azure API Management: [Smart Load-Balancing for Azure OpenAI with Azure API Management](https://github.com/andredewes/apim-aoai-smart-loadbalancing)
