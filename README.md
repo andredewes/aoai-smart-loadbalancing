@@ -137,6 +137,40 @@ I honestly think this is a very small price to pay, but if you want to solve tha
 
 Having this in mind, be careful when you configure your hosting container service when it comes to scalability. For instance, the default scaling rules in a Azure Container Apps is the number of concurrent HTTP requests: if it is higher than 10, it will create another container instance. This effect is undesirable for the load balancer as it will create many instances, and that's why the Quick Deploy button in this repo changes that default behavior to only scale the container when CPU usage is higher than 50%. 
 
+### Logging
+The default logging features coming from [YARP](https://microsoft.github.io/reverse-proxy/articles/diagnosing-yarp-issues.html) are not changed here, it is still applicable. For example, you should see these log lines being print in the container console (Stdout) when requests are sucesfully redirected to the backends:
+
+```
+info: Yarp.ReverseProxy.Forwarder.HttpForwarder[9]
+info: Proxying to https://andre-openai-eastus.openai.azure.com/openai/deployments/gpt35turbo/chat/completions?api-version=2023-07-01-preview HTTP/2 RequestVersionOrLower 
+info: Yarp.ReverseProxy.Forwarder.HttpForwarder[56]
+info: Received HTTP/2.0 response 200.
+info: Yarp.ReverseProxy.Forwarder.HttpForwarder[9]
+info: Proxying to https://andre-openai-eastus.openai.azure.com/openai/deployments/gpt35turbo/chat/completions?api-version=2023-07-01-preview HTTP/2 RequestVersionOrLower 
+info: Yarp.ReverseProxy.Forwarder.HttpForwarder[56]
+info: Received HTTP/2.0 response 200.
+```
+
+Now, these are example of logs generated when the load balancer receives a 429 error from the OpenAI backend:
+
+```
+info: Yarp.ReverseProxy.Forwarder.HttpForwarder[56]
+info: Received HTTP/2.0 response 429.
+warn: Yarp.ReverseProxy.Health.DestinationHealthUpdater[19]
+warn: Destination `BACKEND_4` marked as 'Unhealthy` by the passive health check is scheduled for a reactivation in `00:00:07`.
+```
+Notice that it reads the value coming in the "Retry-After" header from OpenAI response and marks that backend as Unhealthy and it also prints how much time it will take to be reactivated. In this case, 7 seconds.
+
+And this is the log line that appears after that time is elapsed:
+
+```
+info: Yarp.ReverseProxy.Health.DestinationHealthUpdater[20]
+info: Passive health state of the destination `BACKEND_4` is reset to 'Unknown`.
+```
+
+It is OK that it says the status is reset to "Unknown". That means that backend will be actively receiving HTTP requests and its internal state will be updated to Healthy if it receives a 200 response from the OpenAI backend next time. This is called Passive health check and is a [YARP feature](https://microsoft.github.io/reverse-proxy/articles/dests-health-checks.html#passive-health-checks).
+
+
 ## :question: FAQ
 
 ### What happens if all backends are throttling at the same time?
