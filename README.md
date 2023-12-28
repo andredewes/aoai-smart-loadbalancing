@@ -52,7 +52,7 @@ If you are not comfortable working with container images and you would like a ve
 
 [![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fandredewes%2Faoai-smart-loadbalancing%2Fmain%2Fazuredeploy.json)
 
-- Clicking the Deploy button above, you will be taken to an Azure page with the required parameters. You need to fill the parameters beginning with "BACKEND_X_" (see below in [Configuring the OpenAI endpoints](#Configuring-the-OpenAI-endpoints) for more information on what they do)
+- Clicking the Deploy button above, you will be taken to an Azure page with the required parameters. You need to fill the parameters beginning with "Backend_X_" (see below in [Configuring the OpenAI endpoints](#Configuring-the-OpenAI-endpoints) for more information on what they do)
 - After the deployment is finished, go to your newly created Container Apps service and from the Overview menu, get the Application Url of your app. The format will be "https://app-[something].[region].azurecontainerapps.io". This is the URL you will call from your client applications
 
 
@@ -104,25 +104,25 @@ It is important to always create 3 environment variables for each new OpenAI end
 
 ### Testing the solution
 
-1. Then test if everything works by running some code of your choice, e.g., this code with OpenAI Python SDK:
-    ```python
-    from openai import AzureOpenAI
+To test if everything works by running some code of your choice, e.g., this code with OpenAI Python SDK:
+```python
+from openai import AzureOpenAI
 
-    client = AzureOpenAI(
-        azure_endpoint="https://<your_load_balancer_url>",  #if you deployed to Azure Container Apps, it will be 'https://app-[something].[region].azurecontainerapps.io'
-        api_key="does-not-matter", #The api-key sent by the client SDKs will be overriden by the ones configured in the backend environment variables
-        api_version="2023-12-01-preview"
-    )
+client = AzureOpenAI(
+    azure_endpoint="https://<your_load_balancer_url>",  #if you deployed to Azure Container Apps, it will be 'https://app-[something].[region].azurecontainerapps.io'
+    api_key="does-not-matter", #The api-key sent by the client SDKs will be overriden by the ones configured in the backend environment variables
+    api_version="2023-12-01-preview"
+)
 
-    response = client.chat.completions.create(
-        model="<your_openai_deployment_name>",
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "What is the first letter of the alphabet?"}
-        ]
-    )
-    print(response)
-    ```
+response = client.chat.completions.create(
+    model="<your_openai_deployment_name>",
+    messages=[
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "What is the first letter of the alphabet?"}
+    ]
+)
+print(response)
+```
 
 ### Scalability vs Reliability
 This solution addresses both scalability and reliability concerns by allowing your total Azure OpenAI quotas to increase and providing server-side failovers transparently for your applications. However, if you are looking purely for a way to increase default quotas, I still would recommend that you follow the official guidance to [request a quota increase](https://learn.microsoft.com/azure/ai-services/openai/quotas-limits#how-to-request-increases-to-the-default-quotas-and-limits).
@@ -140,7 +140,7 @@ Having this in mind, be careful when you configure your hosting container servic
 ## :question: FAQ
 
 ### What happens if all backends are throttling at the same time?
-In that case, the load balancer will return the first backend in the list (line 158) and will forward the request to it. Since that endpoint is throttling, it will return the same 429 error as the OpenAI backend. That's why it is **still important for your client application/SDKs to have a logic to handle retries**, even though it should be much less frequent.
+In that case, the load balancer will route a random backend in the list. Since that endpoint is throttling, it will return the same 429 error as the OpenAI backend. That's why it is **still important for your client application/SDKs to have a logic to handle retries**, even though it should be much less frequent.
 
 ### Reading the C# logic is hard for me. Can you describe it in plain english?
 Sure. That's how it works when the load balancer gets a new incoming request:
